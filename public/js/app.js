@@ -1779,6 +1779,7 @@ function triggerSidebarUpdate() {
 // 7. Mouse/Touch interactions for Zoom & Pan
 function setupInteractionEvents() {
     viewportContainer.addEventListener('mousedown', e => {
+        e.preventDefault(); // Prevent native HTML5 drag/text selection
         viewState.isDragging = true;
         viewState.startX = e.clientX;
         viewState.startY = e.clientY;
@@ -1786,6 +1787,13 @@ function setupInteractionEvents() {
     });
     
     window.addEventListener('mouseup', () => {
+        if (viewState.isDragging) {
+            viewState.isDragging = false;
+            viewportContainer.style.cursor = 'grab';
+        }
+    });
+
+    viewportContainer.addEventListener('mouseleave', () => {
         if (viewState.isDragging) {
             viewState.isDragging = false;
             viewportContainer.style.cursor = 'grab';

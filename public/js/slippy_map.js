@@ -637,6 +637,7 @@ async function updateArbitrarySidebar() {
 viewportContainer.addEventListener('mousedown', e => {
     if (parcels.length > 0) return; // Use original if XML loaded
     e.stopImmediatePropagation();
+    e.preventDefault(); // Prevent native HTML5 drag/text selection
     slippyMapState.isDragging = true;
     slippyMapState.startX = e.clientX;
     slippyMapState.startY = e.clientY;
@@ -656,6 +657,14 @@ window.addEventListener('mouseup', e => {
         slippyMapState.wheelTimer = setTimeout(updateArbitrarySidebar, 500);
     }
 }, true);
+
+viewportContainer.addEventListener('mouseleave', e => {
+    if (slippyMapState.isDragging) {
+        slippyMapState.isDragging = false;
+        viewportContainer.style.cursor = 'grab';
+        drawMap();
+    }
+});
 
 viewportContainer.addEventListener('mousemove', e => {
     if (parcels.length > 0) return;
