@@ -76,7 +76,7 @@ function drawDynamicPublicParcels() {
     const minLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * screenMaxTileY / Math.pow(2, zoom)))) * 180 / Math.PI;
     
     ctx.lineWidth = 1;
-    ctx.strokeStyle = (window.mapSettings && window.mapSettings.lineColor) || '#ef4444';
+    ctx.strokeStyle = (window.mapSettings && window.mapSettings.lineColor) || '#3b82f6';
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -120,7 +120,7 @@ function drawDynamicPublicParcels() {
                 pCanvas.width = 8; pCanvas.height = 8;
                 const pCtx = pCanvas.getContext('2d');
                 pCtx.strokeStyle = (window.mapSettings && window.mapSettings.lineColor) ? 
-                    window.mapSettings.lineColor.replace(')', ', 0.3)').replace('rgb', 'rgba') : 'rgba(239, 68, 68, 0.3)';
+                    window.mapSettings.lineColor.replace(')', ', 0.3)').replace('rgb', 'rgba') : 'rgba(59, 130, 246, 0.3)';
                 // Fallback for hex colors
                 if (pCtx.strokeStyle.indexOf('#') === 0) pCtx.strokeStyle = pCtx.strokeStyle + '4D'; 
                 pCtx.lineWidth = 1;
@@ -133,7 +133,7 @@ function drawDynamicPublicParcels() {
             ctx.fill("evenodd");
             ctx.lineWidth = 2;
         } else if (parcel.id === window.selectedParcelId) {
-            ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.3)';
             ctx.fill("evenodd");
             ctx.lineWidth = 1;
         } else {
@@ -174,7 +174,7 @@ function drawSlippyGsiTiles() {
         for (let ty = Math.floor(centerTileY - (centerY / (TILE_SIZE * scale))); ty <= endY; ty++) {
             if (tx < 0 || tx >= Math.pow(2, zoom) || ty < 0 || ty >= Math.pow(2, zoom)) continue;
             
-            const tileType = (window.mapSettings && window.mapSettings.tileType) || 'std';
+            const tileType = (window.mapSettings && window.mapSettings.tileType) || 'pale';
             const maxZoomMap = {
                 'std': 18,
                 'pale': 18,
