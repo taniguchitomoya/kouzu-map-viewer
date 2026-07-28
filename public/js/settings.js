@@ -1,8 +1,8 @@
 // Default settings
 window.mapSettings = {
-    lineColor: '#ef4444',
+    lineColor: '#3b82f6',
     textColor: '#1e293b',
-    tileType: 'std'
+    tileType: 'pale'
 };
 
 // Load settings from localStorage
