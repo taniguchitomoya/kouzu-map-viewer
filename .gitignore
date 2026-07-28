@@ -1,0 +1,57 @@
+# ==========================================
+# OS-specific files
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ==========================================
+# Editor and IDE configurations
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.fleet/
+
+# ==========================================
+# Python
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ==========================================
+# Application Specific
+# ==========================================
+# Ignore all downloaded ZIPs and generated JSON tiles
+public/data/*
+!public/data/.gitkeep
+
+# 【例外】実験用に新宿区のZIP（13104）と、必須の固定ファイルのみコミット対象にする
+!public/data/13104-*.zip
+!public/data/local_govs.json
+
+# Ignore intermediate tiles directory (if used outside data/)
+public/tiles/
+
+# ==========================================
+# Temporary & Log files
+# ==========================================
+temp/
+scratch/
+*.log
+*.bak
+*.tmp
+*.temp

@@ -1,0 +1,62 @@
+name: Deploy Seamless Map
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Allows manual trigger from Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install pyproj
+
+      # Generate a hash of all zip files to use as the cache key
+      - name: Cache Map Data
+        id: cache-map
+        uses: actions/cache@v4
+        with:
+          path: |
+            public/data/tiles/
+            public/tiles/
+            public/data/public_quadtree_index.json
+            public/data/index_*.json
+            public/data/arbitrary_catalog.json
+          key: ${{ runner.os }}-mapdata-${{ hashFiles('public/data/*.zip') }}
+
+      # Run preprocessing ONLY if cache missed (i.e. ZIP files were added/removed/changed)
+      - name: Run preprocessing scripts
+        if: steps.cache-map.outputs.cache-hit != 'true'
+        run: |
+          python preprocess_quadtree.py
+          python preprocess_arbitrary.py
+          python preprocess_lod.py
+          python merge_lod.py
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './public'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
