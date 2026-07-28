@@ -49,7 +49,7 @@ jobs:
         run: |
           python preprocess_quadtree.py
           python preprocess_arbitrary.py
-          python preprocess_lod.py
+          python preprocess_lod.py all
           python merge_lod.py
 
       - name: Upload Pages Artifact
