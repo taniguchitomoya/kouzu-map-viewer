@@ -28,7 +28,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install pyproj
+        run: pip install pyproj shapely
 
       # Generate a hash of all zip files to use as the cache key
       - name: Cache Map Data
