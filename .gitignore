@@ -39,8 +39,12 @@ pip-delete-this-directory.txt
 public/data/*
 !public/data/.gitkeep
 
-# 【例外】実験用に新宿区のZIP（13104）と、必須の固定ファイルのみコミット対象にする
+# 【例外】都心5区（千代田、中央、港、新宿、渋谷）のZIPと、必須の固定ファイルのみコミット対象にする
+!public/data/13101-*.zip
+!public/data/13102-*.zip
+!public/data/13103-*.zip
 !public/data/13104-*.zip
+!public/data/13113-*.zip
 !public/data/local_govs.json
 
 # Ignore intermediate tiles directory (if used outside data/)
