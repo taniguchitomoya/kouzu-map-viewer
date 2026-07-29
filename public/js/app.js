@@ -1816,8 +1816,8 @@ function setupInteractionEvents() {
             viewState.pinchStartZoom = viewState.zoom;
             
             const rect = mapCanvas.getBoundingClientRect();
-            viewState.pinchCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
-            viewState.pinchCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+            viewState.pinchStartCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+            viewState.pinchStartCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
             
             viewState.pinchStartOffsetX = viewState.offsetX;
             viewState.pinchStartOffsetY = viewState.offsetY;
@@ -1862,11 +1862,12 @@ function setupInteractionEvents() {
             const newZoom = Math.max(0.01, Math.min(100, oldZoom * zoomFactor));
             viewState.zoom = newZoom;
             
-            const mx = viewState.pinchCenterX;
-            const my = viewState.pinchCenterY;
+            const rect = mapCanvas.getBoundingClientRect();
+            const currentCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+            const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
             
-            viewState.offsetX = mx - (mx - viewState.pinchStartOffsetX) * (newZoom / oldZoom);
-            viewState.offsetY = my - (my - viewState.pinchStartOffsetY) * (newZoom / oldZoom);
+            viewState.offsetX = currentCenterX - (viewState.pinchStartCenterX - viewState.pinchStartOffsetX) * (newZoom / oldZoom);
+            viewState.offsetY = currentCenterY - (viewState.pinchStartCenterY - viewState.pinchStartOffsetY) * (newZoom / oldZoom);
             
             updateStatusScale();
             drawMap();

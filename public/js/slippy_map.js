@@ -676,8 +676,11 @@ viewportContainer.addEventListener('touchstart', e => {
         slippyMapState.pinchStartZoom = slippyMapState.zoom;
         
         const rect = mapCanvas.getBoundingClientRect();
-        slippyMapState.pinchCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
-        slippyMapState.pinchCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+        slippyMapState.pinchStartCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+        slippyMapState.pinchStartCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+        
+        slippyMapState.pinchStartLon = slippyMapState.lon;
+        slippyMapState.pinchStartLat = slippyMapState.lat;
     }
 }, {passive: true, capture: true});
 
@@ -762,22 +765,29 @@ viewportContainer.addEventListener('touchmove', e => {
         const oldZoom = slippyMapState.pinchStartZoom;
         const newZoom = Math.max(5, Math.min(24, oldZoom + Math.log2(zoomFactor)));
         
-        if (newZoom !== oldZoom) {
-            const cx = mapCanvas.width / 2;
-            const cy = mapCanvas.height / 2;
-            const dx = slippyMapState.pinchCenterX - cx;
-            const dy = slippyMapState.pinchCenterY - cy;
-            
-            const scaleDiff = Math.pow(2, -oldZoom) - Math.pow(2, -newZoom);
-            const dLon = (dx * 360 / TILE_SIZE) * scaleDiff;
-            const dLat = -(dy * 360 * Math.cos(slippyMapState.lat * Math.PI / 180) / TILE_SIZE) * scaleDiff;
-            
-            slippyMapState.lon += dLon;
-            slippyMapState.lat += dLat;
-            slippyMapState.zoom = newZoom;
-            
-            drawMap();
-        }
+        const rect = mapCanvas.getBoundingClientRect();
+        const currentCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+        const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+        
+        const cx = mapCanvas.width / 2;
+        const cy = mapCanvas.height / 2;
+        
+        const startDx = slippyMapState.pinchStartCenterX - cx;
+        const startDy = slippyMapState.pinchStartCenterY - cy;
+        const currentDx = currentCenterX - cx;
+        const currentDy = currentCenterY - cy;
+        
+        const lonOffsetStart = (startDx * 360 / TILE_SIZE) * Math.pow(2, -oldZoom);
+        const lonOffsetCurrent = (currentDx * 360 / TILE_SIZE) * Math.pow(2, -newZoom);
+        
+        const latOffsetStart = -(startDy * 360 * Math.cos(slippyMapState.pinchStartLat * Math.PI / 180) / TILE_SIZE) * Math.pow(2, -oldZoom);
+        const latOffsetCurrent = -(currentDy * 360 * Math.cos(slippyMapState.pinchStartLat * Math.PI / 180) / TILE_SIZE) * Math.pow(2, -newZoom);
+        
+        slippyMapState.lon = slippyMapState.pinchStartLon + (lonOffsetStart - lonOffsetCurrent);
+        slippyMapState.lat = slippyMapState.pinchStartLat + (latOffsetStart - latOffsetCurrent);
+        slippyMapState.zoom = newZoom;
+        
+        drawMap();
     }
 }, {passive: false, capture: true});
 
