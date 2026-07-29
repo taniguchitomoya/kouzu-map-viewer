@@ -633,7 +633,41 @@ async function updateArbitrarySidebar() {
     }
 }
 
+// Link zoom buttons to Slippy Map
+const slippyZoomInBtn = document.getElementById('zoomInBtn');
+if (slippyZoomInBtn) {
+    slippyZoomInBtn.addEventListener('click', (e) => {
+        if (parcels.length > 0) return;
+        const oldZoom = slippyMapState.zoom;
+        slippyMapState.zoom = Math.max(5, Math.min(24, oldZoom + 1));
+        drawMap();
+        clearTimeout(slippyMapState.wheelTimer);
+        slippyMapState.wheelTimer = setTimeout(updateArbitrarySidebar, 500);
+    });
+}
+
+const slippyZoomOutBtn = document.getElementById('zoomOutBtn');
+if (slippyZoomOutBtn) {
+    slippyZoomOutBtn.addEventListener('click', (e) => {
+        if (parcels.length > 0) return;
+        const oldZoom = slippyMapState.zoom;
+        slippyMapState.zoom = Math.max(5, Math.min(24, oldZoom - 1));
+        drawMap();
+        clearTimeout(slippyMapState.wheelTimer);
+        slippyMapState.wheelTimer = setTimeout(updateArbitrarySidebar, 500);
+    });
+}
+
 // Hook into interaction events for Slippy Map
+viewportContainer.addEventListener('touchstart', e => {
+    if (parcels.length > 0) return;
+    if (e.touches.length === 1) {
+        slippyMapState.isDragging = true;
+        slippyMapState.startX = e.touches[0].clientX;
+        slippyMapState.startY = e.touches[0].clientY;
+    }
+}, {passive: true, capture: true});
+
 viewportContainer.addEventListener('mousedown', e => {
     if (parcels.length > 0) return; // Use original if XML loaded
     e.stopImmediatePropagation();
@@ -642,6 +676,16 @@ viewportContainer.addEventListener('mousedown', e => {
     slippyMapState.startX = e.clientX;
     slippyMapState.startY = e.clientY;
     viewportContainer.style.cursor = 'grabbing';
+}, true);
+
+window.addEventListener('touchend', e => {
+    if (slippyMapState.isDragging) {
+        if (parcels.length === 0) e.stopImmediatePropagation();
+        slippyMapState.isDragging = false;
+        drawMap();
+        clearTimeout(slippyMapState.wheelTimer);
+        slippyMapState.wheelTimer = setTimeout(updateArbitrarySidebar, 500);
+    }
 }, true);
 
 window.addEventListener('mouseup', e => {
@@ -665,6 +709,27 @@ viewportContainer.addEventListener('mouseleave', e => {
         drawMap();
     }
 });
+
+viewportContainer.addEventListener('touchmove', e => {
+    if (parcels.length > 0) return;
+    if (slippyMapState.isDragging && e.touches.length === 1) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        const dx = e.touches[0].clientX - slippyMapState.startX;
+        const dy = e.touches[0].clientY - slippyMapState.startY;
+        
+        const zoom = slippyMapState.zoom;
+        const dLon = -dx / Math.pow(2, zoom) / TILE_SIZE * 360;
+        const dLat = dy / Math.pow(2, zoom) / TILE_SIZE * 360 * Math.cos(slippyMapState.lat * Math.PI/180);
+        
+        slippyMapState.lon += dLon;
+        slippyMapState.lat += dLat;
+        
+        slippyMapState.startX = e.touches[0].clientX;
+        slippyMapState.startY = e.touches[0].clientY;
+        drawMap();
+    }
+}, {passive: false, capture: true});
 
 viewportContainer.addEventListener('mousemove', e => {
     if (parcels.length > 0) return;

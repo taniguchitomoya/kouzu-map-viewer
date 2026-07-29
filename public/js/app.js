@@ -1800,6 +1800,35 @@ function setupInteractionEvents() {
         }
     });
     
+    viewportContainer.addEventListener('touchstart', e => {
+        if (e.touches.length === 1) {
+            viewState.isDragging = true;
+            viewState.startX = e.touches[0].clientX;
+            viewState.startY = e.touches[0].clientY;
+        }
+    }, {passive: true});
+
+    window.addEventListener('touchend', () => {
+        if (viewState.isDragging) {
+            viewState.isDragging = false;
+        }
+    });
+
+    viewportContainer.addEventListener('touchmove', e => {
+        if (parcels.length === 0) return;
+        if (viewState.isDragging && e.touches.length === 1) {
+            e.preventDefault();
+            const dx = e.touches[0].clientX - viewState.startX;
+            const dy = e.touches[0].clientY - viewState.startY;
+            viewState.offsetX += dx;
+            viewState.offsetY += dy;
+            viewState.startX = e.touches[0].clientX;
+            viewState.startY = e.touches[0].clientY;
+            drawMap();
+            triggerSidebarUpdate();
+        }
+    }, {passive: false});
+    
     viewportContainer.addEventListener('mousemove', e => {
         if (parcels.length === 0) return;
         // Handle drag panning
