@@ -1803,14 +1803,37 @@ function setupInteractionEvents() {
     viewportContainer.addEventListener('touchstart', e => {
         if (e.touches.length === 1) {
             viewState.isDragging = true;
+            viewState.isPinching = false;
             viewState.startX = e.touches[0].clientX;
             viewState.startY = e.touches[0].clientY;
+        } else if (e.touches.length === 2) {
+            viewState.isDragging = false;
+            viewState.isPinching = true;
+            viewState.pinchStartDist = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+            viewState.pinchStartZoom = viewState.zoom;
+            
+            const rect = mapCanvas.getBoundingClientRect();
+            viewState.pinchCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+            viewState.pinchCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+            
+            viewState.pinchStartOffsetX = viewState.offsetX;
+            viewState.pinchStartOffsetY = viewState.offsetY;
         }
     }, {passive: true});
 
-    window.addEventListener('touchend', () => {
-        if (viewState.isDragging) {
+    window.addEventListener('touchend', e => {
+        if (e.touches.length === 0) {
             viewState.isDragging = false;
+            viewState.isPinching = false;
+        } else if (e.touches.length === 1) {
+            // Re-init drag if one finger is lifted during pinch
+            viewState.isPinching = false;
+            viewState.isDragging = true;
+            viewState.startX = e.touches[0].clientX;
+            viewState.startY = e.touches[0].clientY;
         }
     });
 
@@ -1824,6 +1847,28 @@ function setupInteractionEvents() {
             viewState.offsetY += dy;
             viewState.startX = e.touches[0].clientX;
             viewState.startY = e.touches[0].clientY;
+            drawMap();
+            triggerSidebarUpdate();
+        } else if (viewState.isPinching && e.touches.length === 2) {
+            e.preventDefault();
+            const currentDist = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+            if (viewState.pinchStartDist === 0) return;
+            
+            const zoomFactor = currentDist / viewState.pinchStartDist;
+            const oldZoom = viewState.pinchStartZoom;
+            const newZoom = Math.max(0.01, Math.min(100, oldZoom * zoomFactor));
+            viewState.zoom = newZoom;
+            
+            const mx = viewState.pinchCenterX;
+            const my = viewState.pinchCenterY;
+            
+            viewState.offsetX = mx - (mx - viewState.pinchStartOffsetX) * (newZoom / oldZoom);
+            viewState.offsetY = my - (my - viewState.pinchStartOffsetY) * (newZoom / oldZoom);
+            
+            updateStatusScale();
             drawMap();
             triggerSidebarUpdate();
         }

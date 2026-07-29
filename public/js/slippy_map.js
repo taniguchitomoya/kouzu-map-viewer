@@ -663,8 +663,21 @@ viewportContainer.addEventListener('touchstart', e => {
     if (parcels.length > 0) return;
     if (e.touches.length === 1) {
         slippyMapState.isDragging = true;
+        slippyMapState.isPinching = false;
         slippyMapState.startX = e.touches[0].clientX;
         slippyMapState.startY = e.touches[0].clientY;
+    } else if (e.touches.length === 2) {
+        slippyMapState.isDragging = false;
+        slippyMapState.isPinching = true;
+        slippyMapState.pinchStartDist = Math.hypot(
+            e.touches[0].clientX - e.touches[1].clientX,
+            e.touches[0].clientY - e.touches[1].clientY
+        );
+        slippyMapState.pinchStartZoom = slippyMapState.zoom;
+        
+        const rect = mapCanvas.getBoundingClientRect();
+        slippyMapState.pinchCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+        slippyMapState.pinchCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
     }
 }, {passive: true, capture: true});
 
@@ -679,12 +692,20 @@ viewportContainer.addEventListener('mousedown', e => {
 }, true);
 
 window.addEventListener('touchend', e => {
-    if (slippyMapState.isDragging) {
-        if (parcels.length === 0) e.stopImmediatePropagation();
-        slippyMapState.isDragging = false;
-        drawMap();
-        clearTimeout(slippyMapState.wheelTimer);
-        slippyMapState.wheelTimer = setTimeout(updateArbitrarySidebar, 500);
+    if (e.touches.length === 0) {
+        if (slippyMapState.isDragging || slippyMapState.isPinching) {
+            if (parcels.length === 0) e.stopImmediatePropagation();
+            slippyMapState.isDragging = false;
+            slippyMapState.isPinching = false;
+            drawMap();
+            clearTimeout(slippyMapState.wheelTimer);
+            slippyMapState.wheelTimer = setTimeout(updateArbitrarySidebar, 500);
+        }
+    } else if (e.touches.length === 1) {
+        slippyMapState.isPinching = false;
+        slippyMapState.isDragging = true;
+        slippyMapState.startX = e.touches[0].clientX;
+        slippyMapState.startY = e.touches[0].clientY;
     }
 }, true);
 
@@ -728,6 +749,35 @@ viewportContainer.addEventListener('touchmove', e => {
         slippyMapState.startX = e.touches[0].clientX;
         slippyMapState.startY = e.touches[0].clientY;
         drawMap();
+    } else if (slippyMapState.isPinching && e.touches.length === 2) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        const currentDist = Math.hypot(
+            e.touches[0].clientX - e.touches[1].clientX,
+            e.touches[0].clientY - e.touches[1].clientY
+        );
+        if (slippyMapState.pinchStartDist === 0) return;
+        
+        const zoomFactor = currentDist / slippyMapState.pinchStartDist;
+        const oldZoom = slippyMapState.pinchStartZoom;
+        const newZoom = Math.max(5, Math.min(24, oldZoom + Math.log2(zoomFactor)));
+        
+        if (newZoom !== oldZoom) {
+            const cx = mapCanvas.width / 2;
+            const cy = mapCanvas.height / 2;
+            const dx = slippyMapState.pinchCenterX - cx;
+            const dy = slippyMapState.pinchCenterY - cy;
+            
+            const scaleDiff = Math.pow(2, -oldZoom) - Math.pow(2, -newZoom);
+            const dLon = (dx * 360 / TILE_SIZE) * scaleDiff;
+            const dLat = -(dy * 360 * Math.cos(slippyMapState.lat * Math.PI / 180) / TILE_SIZE) * scaleDiff;
+            
+            slippyMapState.lon += dLon;
+            slippyMapState.lat += dLat;
+            slippyMapState.zoom = newZoom;
+            
+            drawMap();
+        }
     }
 }, {passive: false, capture: true});
 
