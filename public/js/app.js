@@ -9,12 +9,29 @@ let currentZipReader = null;
 let currentRootZipReaders = [];
 let currentNestedZipReaders = [];
 
+// #7: proj4 変換器インスタンスをモジュールレベルでキャッシュ
+// 毎回文字列ベースの EPSG ルックアップをしなくてよくなる
+let _wgs84ToWm = null;
+document.addEventListener('DOMContentLoaded', () => {
+    if (typeof proj4 !== 'undefined') {
+        // proj4.Proj インスタンスを一度生成して出力形式を固定
+        _wgs84ToWm = proj4("EPSG:4326", "EPSG:3857").forward;
+    }
+});
 
-// Configure zip.js to run in the main thread (no workers) to prevent worker setup failures.
+// #9: WebWorker が使える環境では zip.js の Worker を有効化しメインスレッドのブロックを軽減
 if (window.zip) {
-    zip.configure({
-        useWebWorkers: false
-    });
+    try {
+        // Worker対応確認: window.Worker が存在する場合は Worker を許可
+        if (typeof Worker !== 'undefined') {
+            zip.configure({ useWebWorkers: true });
+        } else {
+            // 非対応環境（一部サンドボックス等）はメインスレッドにフォールバック
+            zip.configure({ useWebWorkers: false });
+        }
+    } catch(e) {
+        zip.configure({ useWebWorkers: false });
+    }
 }
 
 // Map viewport configuration
@@ -628,44 +645,56 @@ async function scanDataDirectory() {
         
         if (cityCode) {
             try {
-                const response = await fetch('./data/');
-                if (!response.ok) throw new Error('Directory listing not available');
-                const html = await response.text();
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(html, 'text/html');
-                const links = doc.getElementsByTagName('a');
+                // #5: local_govs.json の zips フィールドを使って直接 ZIP URL を構築
+                // HTMLディレクトリリスティングのフェッチ+DOMパースが不要になり高速化
+                const prefCode = prefSelect.value;
+                const cityInfo = (CITIES[prefCode] || []).find(c => c.code === cityCode);
                 
-                let zipGroups = {};
-                for (let link of links) {
-                    const href = link.getAttribute('href');
-                    if (href && href.endsWith('.zip')) {
-                        const filename = decodeURIComponent(href).split('/').pop();
-                        const match = filename.match(new RegExp(`^${cityCode}-([0-9a-zA-Z]+)-([0-9]+)\\.zip$`));
-                        if (match) {
-                            const registryCode = match[1];
-                            const year = parseInt(match[2], 10);
-                            if (!zipGroups[registryCode] || zipGroups[registryCode].year < year) {
-                                zipGroups[registryCode] = { year: year, url: './data/' + href };
-                            }
-                        } else if (filename.startsWith(cityCode + '-')) {
-                            // Fallback for non-standard filenames
-                            if (!zipGroups[filename]) {
-                                zipGroups[filename] = { year: 0, url: './data/' + href };
+                let foundZipUrls = [];
+                window.currentMinJsonUrl = null;
+                
+                if (cityInfo && cityInfo.zips && cityInfo.zips.length > 0) {
+                    // zips フィールドから直接構築（ネットワーク不要）
+                    foundZipUrls = cityInfo.zips.map(z => `./data/${z}`);
+                } else {
+                    // フォールバック: 従来のディレクトリリスティング方式
+                    const response = await fetch('./data/');
+                    if (!response.ok) throw new Error('Directory listing not available');
+                    const html = await response.text();
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+                    const links = doc.getElementsByTagName('a');
+                    
+                    let zipGroups = {};
+                    for (let link of links) {
+                        const href = link.getAttribute('href');
+                        if (href && href.endsWith('.zip')) {
+                            const filename = decodeURIComponent(href).split('/').pop();
+                            const match = filename.match(new RegExp(`^${cityCode}-([0-9a-zA-Z]+)-([0-9]+)\\.zip$`));
+                            if (match) {
+                                const registryCode = match[1];
+                                const year = parseInt(match[2], 10);
+                                if (!zipGroups[registryCode] || zipGroups[registryCode].year < year) {
+                                    zipGroups[registryCode] = { year: year, url: './data/' + href };
+                                }
+                            } else if (filename.startsWith(cityCode + '-')) {
+                                if (!zipGroups[filename]) {
+                                    zipGroups[filename] = { year: 0, url: './data/' + href };
+                                }
                             }
                         }
                     }
-                }
-                
-                let minJsonUrls = [];
-                for (let link of links) {
-                    const href = link.getAttribute('href');
-                    if (href && href.endsWith('.min.json.gz') && href.startsWith(cityCode)) {
-                        minJsonUrls.push('./data/' + decodeURIComponent(href));
+                    
+                    let minJsonUrls = [];
+                    for (let link of links) {
+                        const href = link.getAttribute('href');
+                        if (href && href.endsWith('.min.json.gz') && href.startsWith(cityCode)) {
+                            minJsonUrls.push('./data/' + decodeURIComponent(href));
+                        }
                     }
+                    window.currentMinJsonUrl = minJsonUrls.length > 0 ? minJsonUrls[0] : null;
+                    foundZipUrls = Object.values(zipGroups).map(g => g.url);
                 }
-                window.currentMinJsonUrl = minJsonUrls.length > 0 ? minJsonUrls[0] : null;
-                
-                const foundZipUrls = Object.values(zipGroups).map(g => g.url);
                 
                 if (foundZipUrls.length === 0) {
                     townSelect.innerHTML = '<option value="">データがありません</option>';
@@ -1629,6 +1658,8 @@ function drawMap() {
 }
 
 // Background grid coordinates helper
+// #8: 全グリッド線を一つの beginPath にまとめて stroke を 1 回で呼ぶ
+// （以前は線 1 本ごとに beginPath→stroke を呼んでいた）
 function drawGrid() {
     ctx.strokeStyle = 'rgba(15, 23, 42, 0.06)';
     ctx.lineWidth = 0.5;
@@ -1636,27 +1667,39 @@ function drawGrid() {
     const step = 50 * viewState.zoom; // grid line every 50 meters (scaled)
     if (step < 10) return; // avoid drawing infinite dense grid lines
     
+    ctx.beginPath();
+    
     // Grid lines along X
     const startX = viewState.offsetX % step;
     for (let x = startX; x < mapCanvas.width; x += step) {
-        ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, mapCanvas.height);
-        ctx.stroke();
     }
     
     // Grid lines along Y
     const startY = viewState.offsetY % step;
     for (let y = startY; y < mapCanvas.height; y += step) {
-        ctx.beginPath();
         ctx.moveTo(0, y);
         ctx.lineTo(mapCanvas.width, y);
-        ctx.stroke();
     }
+    
+    ctx.stroke(); // #8: 1回の stroke 呼び出しで全グリッドを描画
 }
 
-// Global cache for GSI tile images
+// #6: LRU キャッシュ（最大 150 件）でメモリリークを防止
+const TILE_CACHE_MAX = 150;
 const tileCache = {};
+let tileCacheKeys = [];
+
+function tileCachePut(url, img) {
+    if (tileCache[url]) return;
+    tileCache[url] = img;
+    tileCacheKeys.push(url);
+    while (tileCacheKeys.length > TILE_CACHE_MAX) {
+        const oldest = tileCacheKeys.shift();
+        delete tileCache[oldest];
+    }
+}
 
 function drawGsiTiles() {
     // Top-left of canvas in Web Mercator
@@ -1674,15 +1717,19 @@ function drawGsiTiles() {
     if (Z < 0) Z = 0;
     if (Z > 18) Z = 18; 
     
-    function wmToTile(wx, wy, z) {
-        const shift = earth / 2;
-        const tx = (wx + shift) / earth * Math.pow(2, z);
-        const ty = (shift - wy) / earth * Math.pow(2, z);
+    // #1: pow2Z をループ外で一度計算
+    const pow2Z = Math.pow(2, Z);
+    const shift = earth / 2;
+    const earthInvPow = earth / pow2Z;
+    
+    function wmToTile(wx, wy) {
+        const tx = (wx + shift) / earth * pow2Z;
+        const ty = (shift - wy) / earth * pow2Z;
         return { tx, ty };
     }
     
-    const tl = wmToTile(wm_x_min, wm_y_max, Z);
-    const br = wmToTile(wm_x_max, wm_y_min, Z);
+    const tl = wmToTile(wm_x_min, wm_y_max);
+    const br = wmToTile(wm_x_max, wm_y_min);
     
     const tx_min = Math.floor(tl.tx);
     const tx_max = Math.floor(br.tx);
@@ -1692,20 +1739,21 @@ function drawGsiTiles() {
     // Safety limit to avoid crashing the browser with too many tiles
     if ((tx_max - tx_min + 1) * (ty_max - ty_min + 1) > 150) return;
     
-    const tileSizeWM = earth / Math.pow(2, Z);
+    const tileSizeWM = earthInvPow; // = earth / pow2Z
     
     for (let tx = tx_min; tx <= tx_max; tx++) {
         for (let ty = ty_min; ty <= ty_max; ty++) {
             const url = `https://cyberjapandata.gsi.go.jp/xyz/std/${Z}/${tx}/${ty}.png`;
             
-            const tile_wm_x = tx * tileSizeWM - (earth / 2);
-            const tile_wm_y = (earth / 2) - ty * tileSizeWM;
+            const tile_wm_x = tx * tileSizeWM - shift;
+            const tile_wm_y = shift - ty * tileSizeWM;
             
             const sx = (tile_wm_x - bounds.minY) * viewState.zoom + viewState.offsetX;
             const sy = (bounds.maxX - tile_wm_y) * viewState.zoom + viewState.offsetY;
             const size = tileSizeWM * viewState.zoom;
             
-            if (!tileCache[url]) {
+            const cached = tileCache[url];
+            if (!cached) {
                 const img = new Image();
                 img.crossOrigin = "anonymous";
                 img.src = url;
@@ -1714,11 +1762,12 @@ function drawGsiTiles() {
                     img.loaded = true;
                     drawMap(); // redraw map when tile loads
                 };
-                tileCache[url] = img;
+                // #6: LRU キャッシュに登録
+                tileCachePut(url, img);
             }
             
             const img = tileCache[url];
-            if (img.loaded) {
+            if (img && img.loaded) {
                 // ceil size and add 1 to prevent sub-pixel gaps between tiles
                 ctx.drawImage(img, Math.floor(sx), Math.floor(sy), Math.ceil(size)+1, Math.ceil(size)+1);
             }
@@ -2269,6 +2318,12 @@ async function loadWholeCity(url) {
 }
 
 function processMinJson(data) {
+    // #7: 変換器が未初期化の場合（早期呼び出しのフォールバック）
+    if (!_wgs84ToWm && typeof proj4 !== 'undefined') {
+        _wgs84ToWm = proj4("EPSG:4326", "EPSG:3857").forward;
+    }
+    const _convert = _wgs84ToWm || ((pt) => proj4("EPSG:4326", "EPSG:3857", pt));
+    
     let idx = 0;
     const CHUNK_SIZE = 5000;
     const tempParcels = [];
@@ -2289,27 +2344,24 @@ function processMinJson(data) {
                 if(!rings || rings.length === 0) continue;
                 
                 const exteriorCoords = [];
-                // Flatten all points in rings
-                rings.forEach(curve => {
-                    curve.forEach(pt => {
-                        const wm = proj4("EPSG:4326", "EPSG:3857", pt);
-                        exteriorCoords.push({ x: wm[1], y: wm[0] });
-                    });
-                });
-                
-                if (exteriorCoords.length === 0) continue;
-                
                 let minX = Infinity, maxX = -Infinity;
                 let minY = Infinity, maxY = -Infinity;
                 let sumX = 0, sumY = 0;
                 
-                exteriorCoords.forEach(pt => {
-                    if (pt.x < minX) minX = pt.x;
-                    if (pt.x > maxX) maxX = pt.x;
-                    if (pt.y < minY) minY = pt.y;
-                    if (pt.y > maxY) maxY = pt.y;
-                    sumX += pt.x;
-                    sumY += pt.y;
+                // #7: proj4 変換器インスタンスをキャッシュ済みの _convert を使用
+                // Flatten all points in rings（bbox/centroid 計算も同じループで行い二重ループを排除）
+                rings.forEach(curve => {
+                    curve.forEach(pt => {
+                        const wm = _convert(pt);
+                        const wx = wm[1], wy = wm[0];
+                        exteriorCoords.push({ x: wx, y: wy });
+                        if (wx < minX) minX = wx;
+                        if (wx > maxX) maxX = wx;
+                        if (wy < minY) minY = wy;
+                        if (wy > maxY) maxY = wy;
+                        sumX += wx;
+                        sumY += wy;
+                    });
                 });
                 
                 tempParcels.push({

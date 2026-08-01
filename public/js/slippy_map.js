@@ -16,8 +16,44 @@ let slippyMapState = {
     lastMuniCd: null,
     currentLv01Nm: null,
     currentMuniCd: null,
-    currentIndexData: null
+    currentIndexData: null,
+    
+    // #1: 逆ジオコーダー結果キャッシュ（座標 + 結果を保持）
+    rgCache: null, // { lat, lon, muniCd, lv01Nm }
+    RG_CACHE_THRESHOLD: 0.002 // 約200m以内なら再フェッチしない
 };
+
+// #2: index_${muniCd}.json の LRU キャッシュ（最大5件）
+const INDEX_CACHE_MAX = 5;
+const indexCache = new Map(); // muniCd -> indexData
+
+function indexCacheGet(muniCd) {
+    if (!indexCache.has(muniCd)) return undefined;
+    // LRU: 参照されたら末尾に移動
+    const val = indexCache.get(muniCd);
+    indexCache.delete(muniCd);
+    indexCache.set(muniCd, val);
+    return val;
+}
+
+function indexCachePut(muniCd, data) {
+    if (indexCache.has(muniCd)) indexCache.delete(muniCd);
+    indexCache.set(muniCd, data);
+    if (indexCache.size > INDEX_CACHE_MAX) {
+        // 最も古いエントリを削除
+        const oldest = indexCache.keys().next().value;
+        indexCache.delete(oldest);
+    }
+}
+
+// #3: updateDynamicPublicMaps のデバウンスタイマー
+let _dynamicMapDebounceTimer = null;
+function scheduleDynamicPublicMapsUpdate() {
+    clearTimeout(_dynamicMapDebounceTimer);
+    _dynamicMapDebounceTimer = setTimeout(() => {
+        updateDynamicPublicMaps();
+    }, 300);
+}
 
 const TILE_SIZE = 256;
 
@@ -59,8 +95,10 @@ function drawDynamicPublicParcels() {
     if (dynamicPublicParcels.length === 0) return;
     
     const zoom = slippyMapState.zoom;
-    const centerTileX = (slippyMapState.lon + 180) / 360 * Math.pow(2, zoom);
-    const centerTileY = (1 - Math.log(Math.tan(slippyMapState.lat * Math.PI / 180) + 1 / Math.cos(slippyMapState.lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom);
+    // #1: pow2zoom をループ外に一度だけ計算（以前は全点で Math.pow を呼んでいた）
+    const pow2zoom = Math.pow(2, zoom);
+    const centerTileX = (slippyMapState.lon + 180) / 360 * pow2zoom;
+    const centerTileY = (1 - Math.log(Math.tan(slippyMapState.lat * Math.PI / 180) + 1 / Math.cos(slippyMapState.lat * Math.PI / 180)) / Math.PI) / 2 * pow2zoom;
     
     const centerX = mapCanvas.width / 2;
     const centerY = mapCanvas.height / 2;
@@ -70,10 +108,15 @@ function drawDynamicPublicParcels() {
     const screenMinTileY = centerTileY - centerY / TILE_SIZE;
     const screenMaxTileY = centerTileY + centerY / TILE_SIZE;
     
-    const minLon = screenMinTileX / Math.pow(2, zoom) * 360 - 180;
-    const maxLon = screenMaxTileX / Math.pow(2, zoom) * 360 - 180;
-    const maxLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * screenMinTileY / Math.pow(2, zoom)))) * 180 / Math.PI;
-    const minLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * screenMaxTileY / Math.pow(2, zoom)))) * 180 / Math.PI;
+    // #1: pow2zoom を再利用（以前は各行で Math.pow(2, zoom) を再計算）
+    const minLon = screenMinTileX / pow2zoom * 360 - 180;
+    const maxLon = screenMaxTileX / pow2zoom * 360 - 180;
+    const maxLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * screenMinTileY / pow2zoom))) * 180 / Math.PI;
+    const minLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * screenMaxTileY / pow2zoom))) * 180 / Math.PI;
+    
+    // タイル→スクリーン変換の定数係数を事前計算
+    const tileToScreenScale = TILE_SIZE;
+    const inv360pow = 360 / pow2zoom;
     
     ctx.lineWidth = 1;
     ctx.strokeStyle = (window.mapSettings && window.mapSettings.lineColor) || '#3b82f6';
@@ -83,9 +126,20 @@ function drawDynamicPublicParcels() {
     
     for (const parcel of dynamicPublicParcels) {
         if (!parcel.pts || parcel.pts.length === 0) continue;
-        const pLon = parcel.pts[0][0][0];
-        const pLat = parcel.pts[0][0][1];
-        if (parcel.id !== "LOD" && (pLon < minLon - 0.005 || pLon > maxLon + 0.005 || pLat < minLat - 0.005 || pLat > maxLat + 0.005)) continue;
+        
+        // #2: bbox を使った厳密なビューポートカリング
+        // parcel.bbox が存在する場合は bbox で判定（より正確）
+        // なければ従来の先頭点チェックにフォールバック
+        if (parcel.id !== "LOD") {
+            if (parcel.bbox) {
+                if (parcel.bbox.maxLon < minLon || parcel.bbox.minLon > maxLon ||
+                    parcel.bbox.maxLat < minLat || parcel.bbox.minLat > maxLat) continue;
+            } else {
+                const pLon = parcel.pts[0][0][0];
+                const pLat = parcel.pts[0][0][1];
+                if (pLon < minLon - 0.005 || pLon > maxLon + 0.005 || pLat < minLat - 0.005 || pLat > maxLat + 0.005) continue;
+            }
+        }
         
         ctx.beginPath();
         let sumX = 0, sumY = 0;
@@ -97,10 +151,11 @@ function drawDynamicPublicParcels() {
             for (let i = 0; i < ring.length; i++) {
                 const ptLon = ring[i][0];
                 const ptLat = ring[i][1];
-                const ptTileX = (ptLon + 180) / 360 * Math.pow(2, zoom);
-                const ptTileY = (1 - Math.log(Math.tan(ptLat * Math.PI / 180) + 1 / Math.cos(ptLat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom);
-                const px = centerX + (ptTileX - centerTileX) * TILE_SIZE;
-                const py = centerY + (ptTileY - centerTileY) * TILE_SIZE;
+                // #1: Math.pow(2, zoom) → 定数 pow2zoom を利用
+                const ptTileX = (ptLon + 180) / 360 * pow2zoom;
+                const ptTileY = (1 - Math.log(Math.tan(ptLat * Math.PI / 180) + 1 / Math.cos(ptLat * Math.PI / 180)) / Math.PI) / 2 * pow2zoom;
+                const px = centerX + (ptTileX - centerTileX) * tileToScreenScale;
+                const py = centerY + (ptTileY - centerTileY) * tileToScreenScale;
                 if (i === 0) ctx.moveTo(px, py);
                 else ctx.lineTo(px, py);
                 
@@ -148,10 +203,25 @@ function drawDynamicPublicParcels() {
     }
 }
 
+// #7: LRU キャッシュ（最大 200 件）でメモリリークを防止
+const SLIPPY_CACHE_MAX = 200;
 window.slippyCache = {};
+let slippyCacheKeys = []; // insertion-order tracking
+
+function slippyCachePut(url, img) {
+    if (window.slippyCache[url]) return; // already cached
+    window.slippyCache[url] = img;
+    slippyCacheKeys.push(url);
+    // Evict oldest entries when over limit
+    while (slippyCacheKeys.length > SLIPPY_CACHE_MAX) {
+        const oldest = slippyCacheKeys.shift();
+        delete window.slippyCache[oldest];
+    }
+}
 
 function drawSlippyGsiTiles() {
     let zoom = Math.floor(slippyMapState.zoom);
+    // #1: scale の計算を一度だけ
     let scale = Math.pow(2, slippyMapState.zoom - zoom);
     
     if (zoom > 18) {
@@ -159,60 +229,64 @@ function drawSlippyGsiTiles() {
         zoom = 18;
     }
     
-    const centerTileX = (slippyMapState.lon + 180) / 360 * Math.pow(2, zoom);
-    const centerTileY = (1 - Math.log(Math.tan(slippyMapState.lat * Math.PI / 180) + 1 / Math.cos(slippyMapState.lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom);
+    // #1: pow2zoom をループ外に一度計算
+    const pow2zoom = Math.pow(2, zoom);
+    const centerTileX = (slippyMapState.lon + 180) / 360 * pow2zoom;
+    const centerTileY = (1 - Math.log(Math.tan(slippyMapState.lat * Math.PI / 180) + 1 / Math.cos(slippyMapState.lat * Math.PI / 180)) / Math.PI) / 2 * pow2zoom;
     
     const centerX = mapCanvas.width / 2;
     const centerY = mapCanvas.height / 2;
+    const invScale = 1 / (TILE_SIZE * scale);
     
-    const startX = Math.floor(centerTileX - (centerX / (TILE_SIZE * scale)));
-    const endX = Math.ceil(centerTileX + (centerX / (TILE_SIZE * scale)));
-    const startY = Math.floor(centerTileY - (centerTileY / (TILE_SIZE * scale))); // Fixed bound logic
-    const endY = Math.ceil(centerTileY + (centerY / (TILE_SIZE * scale)));
+    const startX = Math.floor(centerTileX - centerX * invScale);
+    const endX = Math.ceil(centerTileX + centerX * invScale);
+    const startY = Math.floor(centerTileY - centerY * invScale);
+    const endY = Math.ceil(centerTileY + centerY * invScale);
+    
+    // ループ外でタイルタイプ依存の定数を計算
+    const tileType = (window.mapSettings && window.mapSettings.tileType) || 'pale';
+    const maxZoomMap = {
+        'std': 18, 'pale': 18, 'seamlessphoto': 18,
+        'blank': 14, 'relief': 15, 'hillshade': 16, 'slopemap': 15
+    };
+    const maxZ = maxZoomMap[tileType] || 18;
+    const reqZ = Math.min(zoom, maxZ);
+    const zDiff = zoom - reqZ;
+    // #1: scaleF もループ外で一度だけ計算
+    const scaleF = Math.pow(2, zDiff);
+    const ext = tileType === 'seamlessphoto' ? 'jpg' : 'png';
+    const sWidth = TILE_SIZE / scaleF;
+    const sHeight = TILE_SIZE / scaleF;
+    const tileScreenSize = TILE_SIZE * scale;
     
     for (let tx = startX; tx <= endX; tx++) {
-        for (let ty = Math.floor(centerTileY - (centerY / (TILE_SIZE * scale))); ty <= endY; ty++) {
-            if (tx < 0 || tx >= Math.pow(2, zoom) || ty < 0 || ty >= Math.pow(2, zoom)) continue;
+        // #1: pow2zoom を再利用（以前はループ内で Math.pow(2, zoom) を毎回呼んでいた）
+        if (tx < 0 || tx >= pow2zoom) continue;
+        const reqX = Math.floor(tx / scaleF);
+        const px = centerX + (tx - centerTileX) * tileScreenSize;
+        const sx = (tx % scaleF) * sWidth;
+        
+        for (let ty = startY; ty <= endY; ty++) {
+            if (ty < 0 || ty >= pow2zoom) continue;
             
-            const tileType = (window.mapSettings && window.mapSettings.tileType) || 'pale';
-            const maxZoomMap = {
-                'std': 18,
-                'pale': 18,
-                'seamlessphoto': 18,
-                'blank': 14,
-                'relief': 15,
-                'hillshade': 16,
-                'slopemap': 15
-            };
-            const maxZ = maxZoomMap[tileType] || 18;
-            const reqZ = Math.min(zoom, maxZ);
-            const zDiff = zoom - reqZ;
-            const scaleF = Math.pow(2, zDiff);
-            const reqX = Math.floor(tx / scaleF);
             const reqY = Math.floor(ty / scaleF);
-            
-            const ext = tileType === 'seamlessphoto' ? 'jpg' : 'png';
             const url = `https://cyberjapandata.gsi.go.jp/xyz/${tileType}/${reqZ}/${reqX}/${reqY}.${ext}`;
-            const px = centerX + (tx - centerTileX) * TILE_SIZE * scale;
-            const py = centerY + (ty - centerTileY) * TILE_SIZE * scale;
-            const size = TILE_SIZE * scale;
-            
-            const sWidth = TILE_SIZE / scaleF;
-            const sHeight = TILE_SIZE / scaleF;
-            const sx = (tx % scaleF) * sWidth;
+            const py = centerY + (ty - centerTileY) * tileScreenSize;
             const sy = (ty % scaleF) * sHeight;
             
-            if (window.slippyCache[url] && window.slippyCache[url].complete) {
-                if (window.slippyCache[url].naturalWidth !== 0) { // check if not broken
-                    ctx.drawImage(window.slippyCache[url], sx, sy, sWidth, sHeight, px, py, size + 1, size + 1);
+            const cached = window.slippyCache[url];
+            if (cached && cached.complete) {
+                if (cached.naturalWidth !== 0) {
+                    ctx.drawImage(cached, sx, sy, sWidth, sHeight, px, py, tileScreenSize + 1, tileScreenSize + 1);
                 }
-            } else if (!window.slippyCache[url] && !slippyMapState.isDragging) {
+            } else if (!cached && !slippyMapState.isDragging) {
                 const img = new Image();
                 img.crossOrigin = "anonymous";
                 img.onload = () => { if (window.drawMap) window.drawMap(); };
                 img.onerror = () => { img.error = true; };
                 img.src = url;
-                window.slippyCache[url] = img;
+                // #7: LRU キャッシュに登録
+                slippyCachePut(url, img);
             }
         }
     }
@@ -387,8 +461,14 @@ async function updateDynamicPublicMaps() {
     
     const toLoadKeys = new Set(visibleTiles);
     let changed = false;
+    // アンロードされたタイルの筆を dynamicPublicParcels から差分削除
     for (const key of loadedPublicXmls.keys()) {
         if (!toLoadKeys.has(key)) {
+            const removed = loadedPublicXmls.get(key);
+            if (removed && removed.length > 0) {
+                const removeSet = new Set(removed.map(p => p.id));
+                dynamicPublicParcels = dynamicPublicParcels.filter(p => !removeSet.has(p.id));
+            }
             loadedPublicXmls.delete(key);
             changed = true;
         }
@@ -402,10 +482,28 @@ async function updateDynamicPublicMaps() {
                 updateDynamicSidebarStatus(`タイル読込中... (${++loadedCount}/${visibleTiles.length})`);
                 const res = await fetch(`./data/tiles/${key}.json`);
                 if (res.ok) {
-                    const parcels = await res.json();
-                    loadedPublicXmls.set(key, parcels);
+                    const tileData = await res.json();
+                    // #2: bbox を筆データに付与して描画時のカリングを高速化
+                    for (const p of tileData) {
+                        if (p.pts && p.pts.length > 0 && p.pts[0].length > 0) {
+                            let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+                            for (const ring of p.pts) {
+                                for (const pt of ring) {
+                                    if (pt[0] < minLon) minLon = pt[0];
+                                    if (pt[0] > maxLon) maxLon = pt[0];
+                                    if (pt[1] < minLat) minLat = pt[1];
+                                    if (pt[1] > maxLat) maxLat = pt[1];
+                                }
+                            }
+                            p.bbox = { minLon, maxLon, minLat, maxLat };
+                        }
+                    }
+                    loadedPublicXmls.set(key, tileData);
+                    // #3: 差分追加（全件再結合せず新規タイルの筆だけ push）
+                    if (dynamicPublicParcels !== lodClusters) {
+                        dynamicPublicParcels.push(...tileData);
+                    }
                     changed = true;
-                    rebuildDynamicParcels();
                     if (window.drawMap) window.drawMap();
                 }
             } catch (e) {
@@ -414,8 +512,8 @@ async function updateDynamicPublicMaps() {
         }
     }
     
-    if (changed) {
-        rebuildDynamicParcels();
+    if (changed && dynamicPublicParcels !== lodClusters) {
+        // タイル削除があった場合は再構築（差分削除済みなのでここでは push のみ補完）
         if (window.drawMap) window.drawMap();
     }
     
@@ -423,10 +521,11 @@ async function updateDynamicPublicMaps() {
     dynamicPublicLoading = false;
 }
 
+// #3: 完全再構築（LOD切替時など明示的リセット時のみ使用）
 function rebuildDynamicParcels() {
     dynamicPublicParcels = [];
-    for (const parcels of loadedPublicXmls.values()) {
-        dynamicPublicParcels.push(...parcels);
+    for (const tileData of loadedPublicXmls.values()) {
+        dynamicPublicParcels.push(...tileData);
     }
 }
 
@@ -438,49 +537,60 @@ async function updateArbitrarySidebar() {
     listEl.innerHTML = '<div style="padding: 10px; color: #666;">中心座標を確認中...</div>';
     
     try {
-        // 1. Reverse Geocode
-        const rgUrl = `https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress?lat=${slippyMapState.lat}&lon=${slippyMapState.lon}`;
-        const rgRes = await fetch(rgUrl);
-        if (!rgRes.ok) throw new Error('Reverse geocoding failed');
+        let muniCd, lv01Nm;
         
-        const rgData = await rgRes.json();
-        if (!rgData || !rgData.results) {
-            listEl.innerHTML = '<div style="padding: 10px; color: #666;">この場所のデータはありません</div>';
-            return;
+        // #1: 逆ジオコーダーキャッシュ確認
+        // 前回フェッチ地点から約200m以内なら API をスキップ
+        const rg = slippyMapState.rgCache;
+        if (rg &&
+            Math.abs(slippyMapState.lat - rg.lat) < slippyMapState.RG_CACHE_THRESHOLD &&
+            Math.abs(slippyMapState.lon - rg.lon) < slippyMapState.RG_CACHE_THRESHOLD) {
+            // キャッシュヒット: 前回の逆ジオ結果を再利用
+            muniCd = rg.muniCd;
+            lv01Nm = rg.lv01Nm;
+        } else {
+            // キャッシュミス: 外部 API フェッチ
+            const rgUrl = `https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress?lat=${slippyMapState.lat}&lon=${slippyMapState.lon}`;
+            const rgRes = await fetch(rgUrl);
+            if (!rgRes.ok) throw new Error('Reverse geocoding failed');
+            
+            const rgData = await rgRes.json();
+            if (!rgData || !rgData.results) {
+                listEl.innerHTML = '<div style="padding: 10px; color: #666;">この場所のデータはありません</div>';
+                return;
+            }
+            
+            muniCd = rgData.results.muniCd;
+            lv01Nm = rgData.results.lv01Nm || "";
+            
+            // 結果をキャッシュ
+            slippyMapState.rgCache = { lat: slippyMapState.lat, lon: slippyMapState.lon, muniCd, lv01Nm };
         }
         
-        const muniCd = rgData.results.muniCd; // e.g. "13104"
-        const lv01Nm = rgData.results.lv01Nm || ""; // e.g. "高田馬場一丁目"
-        
-        // 2. Fetch the corresponding city index if needed
-        if (slippyMapState.lastMuniCd !== muniCd) {
+        // #2: index_${muniCd}.json の LRU キャッシュ確認
+        const cachedIndex = indexCacheGet(muniCd);
+        if (cachedIndex !== undefined) {
+            // キャッシュヒット（null も有効値として扱う）
+            slippyMapState.currentIndexData = cachedIndex;
+            slippyMapState.lastMuniCd = muniCd;
+        } else if (slippyMapState.lastMuniCd !== muniCd) {
+            // キャッシュミス: フェッチして LRU に保存
             try {
-                const [idxRes, pubRes] = await Promise.all([
-                    fetch(`./data/index_${muniCd}.json`),
-                    Promise.resolve(null)
-                ]);
-                
+                const idxRes = await fetch(`./data/index_${muniCd}.json`);
                 if (idxRes.ok) {
                     slippyMapState.currentIndexData = await idxRes.json();
                 } else {
                     slippyMapState.currentIndexData = null;
                 }
-                
-                if (pubRes && pubRes.ok) {
-                    slippyMapState.currentPublicData = await pubRes.json();
-                } else {
-                    slippyMapState.currentPublicData = null;
-                }
-                
+                indexCachePut(muniCd, slippyMapState.currentIndexData);
                 slippyMapState.lastMuniCd = muniCd;
             } catch (e) {
                 slippyMapState.currentIndexData = null;
-                slippyMapState.currentPublicData = null;
             }
         }
         
-        // 2.5 Update Public Maps Panel
-        updateDynamicPublicMaps();
+        // #3: updateDynamicPublicMaps をデバウンスして呼ぶ
+        scheduleDynamicPublicMapsUpdate();
         
         if (!slippyMapState.currentIndexData) {
             listEl.innerHTML = `<div style="padding: 10px; color: #666;">この市区町村（${muniCd}）の任意座標系データは登録されていません</div>`;
@@ -799,9 +909,10 @@ viewportContainer.addEventListener('mousemove', e => {
         const dy = e.clientY - slippyMapState.startY;
         
         const zoom = slippyMapState.zoom;
-        const dLon = -dx / Math.pow(2, zoom) / TILE_SIZE * 360;
-        // Fix: Use 360 instead of 180 to match Web Mercator derivative
-        const dLat = dy / Math.pow(2, zoom) / TILE_SIZE * 360 * Math.cos(slippyMapState.lat * Math.PI/180);
+        // #1: 割り算でまとめる（pow は drag 中は変化しない）
+        const inv = 360 / (Math.pow(2, zoom) * TILE_SIZE);
+        const dLon = -dx * inv;
+        const dLat = dy * inv * Math.cos(slippyMapState.lat * Math.PI/180);
         
         slippyMapState.lon += dLon;
         slippyMapState.lat += dLat;
@@ -818,14 +929,17 @@ viewportContainer.addEventListener('mousemove', e => {
     const my = e.clientY - rect.top;
     
     const zoom = slippyMapState.zoom;
-    const centerTileX = (slippyMapState.lon + 180) / 360 * Math.pow(2, zoom);
-    const centerTileY = (1 - Math.log(Math.tan(slippyMapState.lat * Math.PI / 180) + 1 / Math.cos(slippyMapState.lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom);
+    // #1: pow2zoom を一度だけ計算
+    const pow2zoom = Math.pow(2, zoom);
+    const centerTileX = (slippyMapState.lon + 180) / 360 * pow2zoom;
+    const centerTileY = (1 - Math.log(Math.tan(slippyMapState.lat * Math.PI / 180) + 1 / Math.cos(slippyMapState.lat * Math.PI / 180)) / Math.PI) / 2 * pow2zoom;
     
     const tileX = centerTileX + (mx - mapCanvas.width/2) / TILE_SIZE;
     const tileY = centerTileY + (my - mapCanvas.height/2) / TILE_SIZE;
     
-    const hoverLon = tileX / Math.pow(2, zoom) * 360 - 180;
-    const hoverLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * tileY / Math.pow(2, zoom)))) * 180 / Math.PI;
+    // #1: pow2zoom を再利用
+    const hoverLon = tileX / pow2zoom * 360 - 180;
+    const hoverLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * tileY / pow2zoom))) * 180 / Math.PI;
     
     // Update X/Y coordinates in Web Mercator to match arbitrary map style
     if (typeof proj4 !== 'undefined') {
@@ -838,13 +952,20 @@ viewportContainer.addEventListener('mousemove', e => {
         }
     }
     
-    // Find parcel under mouse
+    // #4: bbox を使った粗フィルタで PIP 候補を大幅に絞り込む
     let hoveredParcel = null;
     if (dynamicPublicParcels.length > 0) {
         for (let i = dynamicPublicParcels.length - 1; i >= 0; i--) {
             const p = dynamicPublicParcels[i];
             if (!p.pts || p.pts.length === 0) continue;
-            if (Math.abs(p.pts[0][0][0] - hoverLon) > 0.005 || Math.abs(p.pts[0][0][1] - hoverLat) > 0.005) continue;
+            // bbox があれば区側定で高速フィルタ
+            if (p.bbox) {
+                if (hoverLon < p.bbox.minLon || hoverLon > p.bbox.maxLon ||
+                    hoverLat < p.bbox.minLat || hoverLat > p.bbox.maxLat) continue;
+            } else {
+                // フォールバック: 先頭点による粗フィルタ
+                if (Math.abs(p.pts[0][0][0] - hoverLon) > 0.005 || Math.abs(p.pts[0][0][1] - hoverLat) > 0.005) continue;
+            }
             
             if (isPointInDynamicPolygon(hoverLon, hoverLat, p.pts)) {
                 hoveredParcel = p;
@@ -897,6 +1018,7 @@ viewportContainer.addEventListener('wheel', e => {
     const newZoom = Math.max(5, Math.min(24, oldZoom + zoomDelta));
     
     if (newZoom !== oldZoom) {
+        // #1: pow を 2 回計算するが変数に収める
         const scaleDiff = Math.pow(2, -oldZoom) - Math.pow(2, -newZoom);
         
         const dLon = (dx * 360 / TILE_SIZE) * scaleDiff;
@@ -1166,26 +1288,38 @@ viewportContainer.addEventListener('click', e => {
 
                         if (window.publicXmlDocCache.has(cacheKey)) {
                             // LRU Cache Hit: Move to newest by deleting and re-inserting
-                            const xmlDoc = window.publicXmlDocCache.get(cacheKey);
+                            const entry = window.publicXmlDocCache.get(cacheKey);
                             window.publicXmlDocCache.delete(cacheKey);
-                            window.publicXmlDocCache.set(cacheKey, xmlDoc);
-                            processFudeDetails(xmlDoc);
+                            window.publicXmlDocCache.set(cacheKey, entry);
+                            // entry は xmlDoc か Promise のどちらかの場合がある
+                            Promise.resolve(entry).then(xmlDoc => {
+                                if (xmlDoc && !(xmlDoc instanceof Promise)) processFudeDetails(xmlDoc);
+                                else if (xmlDoc) xmlDoc.then(d => d && processFudeDetails(d));
+                            });
                         } else {
-                            // Cache Miss: Fetch, Parse, and Store
-                            window.extractXmlFromUrl('./data/' + zipFile, xmlFilename, nestedZip).then(xmlText => {
-                                if (!xmlText) return;
-                                const parser = new DOMParser();
-                                const xmlDoc = parser.parseFromString(xmlText, 'application/xml');
-                                
-                                window.publicXmlDocCache.set(cacheKey, xmlDoc);
-                                // Maintain max cache size of 10 to free memory
-                                if (window.publicXmlDocCache.size > 10) {
-                                    const oldestKey = window.publicXmlDocCache.keys().next().value;
-                                    window.publicXmlDocCache.delete(oldestKey);
-                                }
-                                
-                                processFudeDetails(xmlDoc);
-                            }).catch(e => console.error(e));
+                            // #4: fetch 中の Promise 自体をキャッシュし、連続クリックによる並行 fetch を防止
+                            const fetchPromise = window.extractXmlFromUrl('./data/' + zipFile, xmlFilename, nestedZip)
+                                .then(xmlText => {
+                                    if (!xmlText) return null;
+                                    const parser = new DOMParser();
+                                    const xmlDoc = parser.parseFromString(xmlText, 'application/xml');
+                                    // Promise が解決したら xmlDoc に置き換えてキャッシュを更新
+                                    if (window.publicXmlDocCache.get(cacheKey) === fetchPromise) {
+                                        window.publicXmlDocCache.delete(cacheKey);
+                                        window.publicXmlDocCache.set(cacheKey, xmlDoc);
+                                        // Maintain max cache size of 10 to free memory
+                                        if (window.publicXmlDocCache.size > 10) {
+                                            const oldestKey = window.publicXmlDocCache.keys().next().value;
+                                            window.publicXmlDocCache.delete(oldestKey);
+                                        }
+                                    }
+                                    return xmlDoc;
+                                })
+                                .catch(e => { console.error(e); return null; });
+                            
+                            // fetch 中も Promise をキャッシュしておき、後続のクリックが同じ Promise を待てるようにする
+                            window.publicXmlDocCache.set(cacheKey, fetchPromise);
+                            fetchPromise.then(xmlDoc => { if (xmlDoc) processFudeDetails(xmlDoc); });
                         }
                     }
                 } else {
